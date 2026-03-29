@@ -1190,6 +1190,19 @@ def run_ai_analysis():
     st.session_state["run_ai_on_login"] = False
     st.session_state["rerun_ai"] = False
 
+# ── AI 분析 트리거 ────────────────────────────────────────────────────────────
+if st.session_state.get("run_ai_on_login") or st.session_state.get("rerun_ai"):
+    with st.spinner("AI 종합분析 중..."):
+        run_ai_analysis()
+
+if st.session_state.get("rerun_spy_ai"):
+    with st.spinner("SPY 신호 AI 분析 중..."):
+        run_spy_ai_analysis()
+
+if st.session_state.get("rerun_ind_ai"):
+    with st.spinner("개별 지표 AI 분析 중..."):
+        run_indicator_ai_analysis()
+
 # ── 사이드바: AI 버튼 + Discord 상태 + 로그아웃 ─────────────────────────
 with st.sidebar:
     st.divider()
