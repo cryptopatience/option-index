@@ -5,19 +5,38 @@ discord_notify.py - 8대 지표 현재값 요약 + AI 종합분析을 매일 Dis
 
 import sys
 import os
+import json
 import pathlib
 import requests
 import pandas as pd
 import numpy as np
 import yfinance as yf
-from datetime import datetime
+from datetime import datetime, timedelta
 
 WEBHOOK_URL = (
     "https://discord.com/api/webhooks/1487700119137816657/"
     "rG52A7W_J8oTlsITvWaJgAuukFiOUueoICHRPW7bMEoDIcmrmMkSDBeNC8e6z4N66WMC"
 )
-PERIOD = "1y"
+PERIOD     = "1y"
 SCRIPT_DIR = pathlib.Path(__file__).parent
+STATUS_FILE = SCRIPT_DIR / "discord_status.json"
+
+
+def save_status(ok_table: bool, ok_ai: bool, detail: str = "") -> None:
+    now      = datetime.now()
+    next_run = (now + timedelta(days=1)).replace(hour=8, minute=0, second=0, microsecond=0)
+    if next_run <= now:
+        next_run += timedelta(days=1)
+    payload = {
+        "last_sent":   now.strftime("%Y-%m-%d %H:%M:%S"),
+        "table_ok":    ok_table,
+        "ai_ok":       ok_ai,
+        "overall_ok":  ok_table and ok_ai,
+        "detail":      detail,
+        "next_send":   next_run.strftime("%Y-%m-%d %H:%M"),
+    }
+    with open(STATUS_FILE, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
 
 
 # ── secrets.toml 로더 ────────────────────────────────────────────────────────
@@ -555,6 +574,16 @@ def main():
     else:
         print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] AI 분析 스킵 (API 키 없음)")
 
+    detail_parts = []
+    if ok1: detail_parts.append("지표 테이블 ✅")
+    else:   detail_parts.append("지표 테이블 ❌")
+    if ai_embeds:
+        if ok2: detail_parts.append("AI 분析 ✅")
+        else:   detail_parts.append("AI 분析 ❌")
+    else:
+        detail_parts.append("AI 분析 스킵(키 없음)")
+
+    save_status(ok1, ok2, " | ".join(detail_parts))
     return 0 if (ok1 and ok2) else 1
 
 

@@ -3,7 +3,9 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-from datetime import datetime
+import json
+import pathlib
+from datetime import datetime, timedelta
 
 st.set_page_config(
     page_title="옵션 저점매수 전략 대시보드",
@@ -1188,7 +1190,7 @@ def run_ai_analysis():
     st.session_state["run_ai_on_login"] = False
     st.session_state["rerun_ai"] = False
 
-# ── 사이드바: 재분석 버튼 + 로그아웃(최하단) ──────────────────────────────────
+# ── 사이드바: AI 버튼 + Discord 상태 + 로그아웃 ─────────────────────────
 with st.sidebar:
     st.divider()
     if st.button("🔄 AI 재분석", use_container_width=True):
@@ -1200,7 +1202,31 @@ with st.sidebar:
     if st.button("📊 개별 지표 분析", use_container_width=True):
         st.session_state["rerun_ind_ai"] = True
         st.rerun()
-    st.markdown("<br>" * 5, unsafe_allow_html=True)
+
+    # ── Discord 전송 상태 ────────────────────────────────────────────
+    st.divider()
+    st.markdown("#### 📨 Discord 알림")
+    _status_path = pathlib.Path(__file__).parent / "discord_status.json"
+    if _status_path.exists():
+        try:
+            _s    = json.loads(_status_path.read_text(encoding="utf-8"))
+            _ok   = _s.get("overall_ok", False)
+            _icon = "✅" if _ok else "❌"
+            _last = _s.get("last_sent", "—")
+            _next = _s.get("next_send", "—")
+            _det  = _s.get("detail", "")
+            st.markdown(f"{_icon} **마지막 전송**  \n`{_last}`  \n_{_det}_")
+            st.markdown(f"🕗 **다음 예정**  \n`{_next}`")
+        except Exception:
+            st.warning("상태 파일 읽기 실패")
+    else:
+        _now  = datetime.now()
+        _next = _now.replace(hour=8, minute=0, second=0, microsecond=0)
+        if _next <= _now:
+            _next += timedelta(days=1)
+        st.markdown(f"⏳ **아직 전송 전**  \n다음 예정: `{_next.strftime('%Y-%m-%d 08:00')}`")
+
+    st.markdown("<br>" * 3, unsafe_allow_html=True)
     st.divider()
     if st.button("🚪 로그아웃", use_container_width=True):
         for k in ["authenticated","gemini_result","openai_result",
@@ -1209,241 +1235,3 @@ with st.sidebar:
                   "run_ai_on_login","rerun_ai","rerun_spy_ai","rerun_ind_ai"]:
             st.session_state.pop(k, None)
         st.rerun()
-
-# ── AI 분析 결과 ───────────────────────────────────────────────────────────────
-st.divider()
-st.subheader("🤖 AI 분析")
-
-# ── 스피너: 각 분析 플래그 처리 ──────────────────────────────────────────────
-if st.session_state.get("run_ai_on_login") or st.session_state.get("rerun_ai"):
-    _sel   = st.session_state.get("ai_model_sel", "둘 다")
-    _mode  = st.session_state.get("ai_mode_sel",  "Deep Dive")
-    _label = {"Gemini 2.5 Pro": "Gemini 2.5 Pro", "GPT-4o": "GPT-4o", "둘 다": "Gemini + GPT-4o"}.get(_sel, _sel)
-    with st.spinner(f"🤖 AI 분析 중... ({_label} · {_mode})"):
-        run_ai_analysis()
-
-if st.session_state.get("rerun_spy_ai"):
-    _sel   = st.session_state.get("ai_model_sel", "둘 다")
-    _label = {"둘 다": "Gemini + GPT-4o", "Gemini 2.5 Pro": "Gemini 2.5 Pro", "GPT-4o": "GPT-4o"}.get(_sel, _sel)
-    with st.spinner(f"🔍 SPY 신호 분析 중... ({_label})"):
-        run_spy_ai_analysis()
-
-if st.session_state.get("rerun_ind_ai"):
-    _sel   = st.session_state.get("ai_model_sel", "둘 다")
-    _label = {"둘 다": "Gemini + GPT-4o", "Gemini 2.5 Pro": "Gemini 2.5 Pro", "GPT-4o": "GPT-4o"}.get(_sel, _sel)
-    with st.spinner(f"🔬 개별 지표 분析 중... ({_label})"):
-        run_indicator_ai_analysis()
-
-# ── 종합분析 ────────────────────────────────────────────────────────────────
-st.markdown("### 📊 종합분析")
-
-has_gemini     = "gemini_result"     in st.session_state
-has_openai     = "openai_result"     in st.session_state
-has_spy_gemini = "spy_gemini_result" in st.session_state
-has_spy_openai = "spy_openai_result" in st.session_state
-
-if has_gemini or has_openai or has_spy_gemini or has_spy_openai:
-    # 탭 구성: 항상 4개 (결과 없으면 "없음" 표시)
-    tab_g, tab_c, tab_sg, tab_sc = st.tabs([
-        "🔵 Gemini — 종합",
-        "🟢 ChatGPT — 종합",
-        "🔵 Gemini — SPY 신호",
-        "🟢 ChatGPT — SPY 신호",
-    ])
-    with tab_g:
-        if has_gemini:
-            st.markdown(st.session_state["gemini_result"])
-        else:
-            st.info("분析 결과 없음 — 사이드바 '🔄 AI 재분析' 버튼을 클릭하세요.")
-    with tab_c:
-        if has_openai:
-            st.markdown(st.session_state["openai_result"])
-        else:
-            st.info("분析 결과 없음 — 사이드바 '🔄 AI 재분析' 버튼을 클릭하세요.")
-    with tab_sg:
-        if has_spy_gemini:
-            st.markdown(st.session_state["spy_gemini_result"])
-        else:
-            st.info("분析 결과 없음 — 사이드바 '🔍 SPY 신호 분析' 버튼을 클릭하세요.")
-    with tab_sc:
-        if has_spy_openai:
-            st.markdown(st.session_state["spy_openai_result"])
-        else:
-            st.info("분析 결과 없음 — 사이드바 '🔍 SPY 신호 분析' 버튼을 클릭하세요.")
-else:
-    st.info("로그인 후 자동으로 분析이 시작됩니다. 사이드바의 '🔄 AI 재분析' 버튼으로 재실행할 수 있습니다.")
-
-# ── 개별 지표 분析 ──────────────────────────────────────────────────────────
-st.markdown("### 🔬 개별 지표 분析")
-
-# 섹션 파서: AI 응답에서 특정 지표 섹션 추출
-_IND_HEADERS = [
-    "① SDEX/VOLI",
-    "② SKEW/VIX",
-    "③ TDEX/COR1M",
-    "④ VVIX/VIX",
-    "⑤ TDEX",
-    "⑥ VVIX",
-    "⑦ VIX/VIX3M",
-    "⑧ SPY",
-]
-
-def _parse_section(text: str, header_key: str) -> str:
-    """AI 텍스트에서 header_key 를 포함하는 섹션을 추출"""
-    if not text:
-        return ""
-    idx = text.find(header_key)
-    if idx == -1:
-        return ""
-    # 섹션 시작: header_key 앞 줄 찾기
-    line_start = text.rfind("\n", 0, idx)
-    line_start = line_start + 1 if line_start != -1 else 0
-    # 섹션 끝: 다음 ### 헤더 찾기
-    next_h = text.find("\n###", idx + len(header_key))
-    if next_h == -1:
-        next_h = len(text)
-    return text[line_start:next_h].strip()
-
-has_ind_gemini = "ind_gemini_result" in st.session_state
-has_ind_openai = "ind_openai_result" in st.session_state
-
-_IND_LABELS = [
-    "① SDEX/VOLI — 테일 리스크 vs ATM",
-    "② SKEW/VIX — 테일 프리미엄",
-    "③ TDEX/COR1M — 꼬리 헤지 비용",
-    "④ VVIX/VIX — 변동성의 변동성",
-    "⑤ TDEX & 200일 SMA — 꼬리 위험 절대값",
-    "⑥ VVIX & 7일 EMA — 단기 스트레스",
-    "⑦ VIX/VIX3M — 기간 구조",
-    "⑧ SPY 통합 신호",
-]
-
-with st.expander("📋 개별 지표 분析 펼치기", expanded=False):
-    if has_ind_gemini or has_ind_openai:
-        selected_label = st.selectbox(
-            "분析할 지표 선택",
-            _IND_LABELS,
-            key="ind_selector",
-        )
-        selected_idx   = _IND_LABELS.index(selected_label)
-        selected_key   = _IND_HEADERS[selected_idx]
-
-        itab_g, itab_c = st.tabs(["🔵 Gemini", "🟢 ChatGPT"])
-        with itab_g:
-            if has_ind_gemini:
-                section = _parse_section(st.session_state["ind_gemini_result"], selected_key)
-                if section:
-                    st.markdown(section)
-                else:
-                    st.markdown(st.session_state["ind_gemini_result"])
-            else:
-                st.info("Gemini 분析 결과 없음")
-        with itab_c:
-            if has_ind_openai:
-                section = _parse_section(st.session_state["ind_openai_result"], selected_key)
-                if section:
-                    st.markdown(section)
-                else:
-                    st.markdown(st.session_state["ind_openai_result"])
-            else:
-                st.info("ChatGPT 분析 결과 없음")
-    else:
-        st.info("사이드바의 '📊 개별 지표 분析' 버튼을 클릭하면 8개 지표 각각에 대한 심층 분析을 제공합니다.")
-
-
-# ── 8대 지표 해석 가이드 (펼치기) ────────────────────────────────────────────
-st.divider()
-with st.expander("📋 8대 지표 해석 가이드 (클릭하여 펼치기)", expanded=False):
-    st.markdown("""
-### ① SDEX/VOLI — 옵션 테일 리스크 vs ATM 변동성
-| 구간 | 레벨명 | 해석 | 신호 |
-|------|--------|------|------|
-| ≤ 1.0 | Must Buy Secular Lows | 역사적 세속적 저점. 장기적 관점 최강 매수 기회 | +2 |
-| 1.0~2.0 | Must Buy Cyclical Lows | 순환적 저점 구간, 중기 매수 기회 | +1 |
-| > 2.0 | 일반 시장 상태 | 특별한 신호 없음, 중립 | 0 |
-
-*SDEX = S&P500 하방 분산 지수 (NASDAQ) / VOLI = ATM 변동성 지수 (NASDAQ)*
-
----
-### ② SKEW/VIX — 테일 리스크 프리미엄 vs 전반 변동성
-| 구간 | 레벨명 | 해석 | 신호 |
-|------|--------|------|------|
-| ≤ 2.0 | Approaching Must Buy Levels | Tail Risk가 팔리고 있음, 역발상 강한 매수 | +2 |
-| 2.0~5.0 | Correction / Cyclical Bear Lows | 조정 저점 또는 경기 약세장 저점 구간, 매수 기회 | +1 |
-| 5.0~11.0 | 일반 시장 상태 | 정상 범위, 특별한 신호 없음 | 0 |
-| > 11.0 | Approaching Reversal Risk Levels | 테일 리스크 프리미엄 과도, 강한 숏 신호 | −2 |
-
-*SKEW = CBOE Skew Index (비대칭 리스크 측정). 낮을수록 꼬리 위험이 시장에서 저평가된 것*
-
----
-### ③ TDEX/COR1M — 꼬리 헤지 비용 vs 상관관계 분산
-| 구간 | 레벨명 | 해석 | 신호 |
-|------|--------|------|------|
-| ≤ 0.5 | Cheap Tail Hedge | 3σ OTM 풋 매수 유리, 역발상 롱 기회 | +1 |
-| 0.5~1.0 | 중립적 가격대 | 시장 이벤트에 따라 변동, 리스크 주시 | 0 |
-| > 1.0 | 3σ OTM Protection vs Correlation | 깊은 OTM 보호 비용 과다, 숏 신호 | −1 |
-
-*TDEX = Nasdaq Tail Risk Index / COR1M = CBOE 1개월 내재 상관관계 지수*
-
----
-### ④ VVIX/VIX — 변동성의 변동성 vs 전반 변동성 (50일 SMA 포함)
-| 구간 | 레벨명 | 해석 | 신호 |
-|------|--------|------|------|
-| ≤ 3.50 | Getting Overdone (과도한 안도) | 시장이 위험 무시, VIX 급등 잠재, 역발상 강한 롱 | +2 |
-| 3.50~4.75 | Correction BTFD Potential | 조정 시 저가 매수 잠재 구간, 롱 신호 | +1 |
-| 4.75~6.50 | 일반 시장 상태 | 정상 범위, 특별한 신호 없음 | 0 |
-| ≥ 6.50 | Getting Extended (과도한 공포) | VIX 옵션 수요·공포 극대화, 숏 신호 | −1 |
-
-VVIX/VIX > 50일 SMA → 공포 증가 추세 / VVIX/VIX < 50일 SMA → 공포 완화 추세
-
----
-### ⑤ TDEX & 200일 SMA — 꼬리 위험 절대 수준 + 200일 추세
-| 구간 | 레벨명 | 해석 | 신호 |
-|------|--------|------|------|
-| > 30 | MUST BUY ZONE | 극단 공포, 역발상 최강 매수 신호 | +2 |
-| 25~30 | Big Crashes End Above 25 | 대형 폭락 종료 구간, 역사적 대형 급락 마무리 수준 | +2 |
-| 20~25 | Corrections End Above 20 | 일반 조정 마무리 수준, 매수 고려 | +1 |
-| 15~20 | Harder for Corrections to Extend | 조정 심화 어려운 구간, 정상 투자 환경 | 0 |
-| 7.5~15 | OTM Puts @ Premium | 풋 보호 수요 존재, 정상 변동성 수준 | 0 |
-| < 7.5 | Correction Ending or Crash Beginning | 조정 종료 또는 폭락 시작 기로, 타 지표 교차 확인 필요 | ❓ |
-
-TDEX > 200일 SMA → 꼬리 위험 증가 / TDEX < 200일 SMA → 감소
-
----
-### ⑥ VVIX & 7일 EMA — 단기 변동성 스트레스 + EMA 방향
-| 구간 | 해석 | 신호 |
-|------|------|------|
-| > 100 | 스트레스 레벨 — VIX 옵션 변동성 극단, 패닉 상태 | 위험 |
-| 80~100 | 정상 레벨 — 일반적으로 유지되는 구간 | 중립 |
-| < 80 | 저레벨 — 변동성 낮은 안정 상태 (갑작스러운 급등 주의) | 낙용 |
-
-VVIX > 7일 EMA → 시장 위험 상승 중 / VVIX < 7일 EMA → 시장 공포 완화 중
-
----
-### ⑦ VIX/VIX3M — 단기 변동성 기간 구조 (컨탱고 vs 백워데이션)
-| 구간 | 레벨명 | 해석 | 신호 |
-|------|--------|------|------|
-| ≤ 0.8 | 강한 컨탱고 (Strong Contango) | 단기 VIX << 장기 VIX, 시장 안정적. 단, 과거 VIX 급등 사례 多 → 역설적 주의 | 주의 |
-| 0.8~1.0 | 정상 기간 구조 (Normal) | 일반적인 시장 상태 | 중립 |
-| ≥ 1.0 | 백워데이션 (Backwardation) | 단기 VIX > 장기 VIX, 시장 스트레스·불확실성 급증 | 위험 |
-
-컨탱고 = 단기 < 장기 (정상) / 백워데이션 = 단기 > 장기 (스트레스)
-
----
-### ⑧ SPY 통합 신호 — 5개 지표 가중 평균 (−2 ~ +2)
-| 신호값 | 신호명 | 발생 조건 |
-|--------|--------|-----------|
-| +2 | 강한 롱 (Strong Long) | SDEX/VOLI ≤ 1.0, 또는 SKEW/VIX ≤ 2.0, 또는 VVIX/VIX ≤ 3.5 등 복수 강한 매수 동시 발생 |
-| +1 | 롱 (Long) | SDEX/VOLI ≤ 2.0, 또는 SKEW/VIX ≤ 5.0, 또는 VVIX/VIX ≤ 4.75, 또는 TDEX/COR1M ≤ 0.5 등 |
-| 0 | 중립 (Neutral) | 모든 지표가 중립 구간 내, 매매 신호 없음 |
-| −1 | 숏 (Short) | VVIX > EMA7, 또는 TDEX/COR1M ≥ 1.0, 또는 VVIX/VIX ≥ 6.5 발생 |
-| −2 | 강한 숏 (Strong Short) | SKEW/VIX ≥ 11.0 등 복수의 강한 위험 신호 동시 발생 |
-
-가중치: VVIX/VIX × 1.0 + VVIX/EMA7 × 1.0 + SKEW/VIX × 1.0 + TDEX/COR1M × 1.0 + SDEX/VOLI × 1.0
-최종 신호: round(가중합 / 총가중치), −2 ~ +2로 클리핑. 각 가중치는 사이드바에서 조절 가능
-""")
-
-st.caption(
-    f"데이터 출처: Yahoo Finance / CBOE  |  "
-    f"마지막 업데이트: {datetime.now().strftime('%Y-%m-%d %H:%M')}"
-)
