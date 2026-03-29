@@ -1248,3 +1248,77 @@ with st.sidebar:
                   "run_ai_on_login","rerun_ai","rerun_spy_ai","rerun_ind_ai"]:
             st.session_state.pop(k, None)
         st.rerun()
+
+# ── AI 분析 결과 출력 ─────────────────────────────────────────────────────────
+def _parse_section(text: str, header_key: str) -> str:
+    """AI 응답에서 특정 헤더 섹션만 추출"""
+    idx = text.find(header_key)
+    if idx == -1:
+        return ""
+    line_start = text.rfind("\n", 0, idx)
+    line_start = line_start + 1 if line_start != -1 else 0
+    next_h = text.find("\n###", idx + len(header_key))
+    if next_h == -1:
+        next_h = len(text)
+    return text[line_start:next_h].strip()
+
+has_main   = "gemini_result"     in st.session_state or "openai_result"     in st.session_state
+has_spy    = "spy_gemini_result" in st.session_state or "spy_openai_result" in st.session_state
+has_ind    = "ind_gemini_result" in st.session_state or "ind_openai_result" in st.session_state
+
+if has_main or has_spy or has_ind:
+    st.divider()
+    st.subheader("🤖 AI 분析")
+
+    # ── 종합 분析 ─────────────────────────────────────────────────────────
+    if has_main or has_spy:
+        st.markdown("#### 📊 종합분析")
+        tab_labels = []
+        if st.session_state.get("gemini_result"):     tab_labels.append("Gemini 종합")
+        if st.session_state.get("openai_result"):     tab_labels.append("ChatGPT 종합")
+        if st.session_state.get("spy_gemini_result"): tab_labels.append("Gemini SPY")
+        if st.session_state.get("spy_openai_result"): tab_labels.append("ChatGPT SPY")
+
+        if tab_labels:
+            tabs = st.tabs(tab_labels)
+            ti = 0
+            if st.session_state.get("gemini_result"):
+                with tabs[ti]: st.markdown(st.session_state["gemini_result"])
+                ti += 1
+            if st.session_state.get("openai_result"):
+                with tabs[ti]: st.markdown(st.session_state["openai_result"])
+                ti += 1
+            if st.session_state.get("spy_gemini_result"):
+                with tabs[ti]: st.markdown(st.session_state["spy_gemini_result"])
+                ti += 1
+            if st.session_state.get("spy_openai_result"):
+                with tabs[ti]: st.markdown(st.session_state["spy_openai_result"])
+
+    # ── 개별 지표 分析 ────────────────────────────────────────────────────
+    if has_ind:
+        with st.expander("🔬 개별 지표 分析", expanded=False):
+            ind_names = [
+                "① SDEX/VOLI", "② SKEW/VIX", "③ TDEX/COR1M", "④ VVIX/VIX",
+                "⑤ TDEX & 200일 SMA", "⑥ VVIX & 7일 EMA", "⑦ VIX/VIX3M", "⑧ SPY 통합 신호",
+            ]
+            selected = st.selectbox("지표 선택", ind_names, key="ind_select")
+
+            g_text = st.session_state.get("ind_gemini_result", "")
+            o_text = st.session_state.get("ind_openai_result", "")
+
+            tab_list = []
+            if g_text: tab_list.append("Gemini")
+            if o_text: tab_list.append("ChatGPT")
+
+            if tab_list:
+                ind_tabs = st.tabs(tab_list)
+                ti = 0
+                if g_text:
+                    with ind_tabs[ti]:
+                        section = _parse_section(g_text, selected)
+                        st.markdown(section if section else g_text)
+                    ti += 1
+                if o_text:
+                    with ind_tabs[ti]:
+                        section = _parse_section(o_text, selected)
+                        st.markdown(section if section else o_text)
