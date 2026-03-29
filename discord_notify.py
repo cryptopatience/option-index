@@ -1,0 +1,357 @@
+"""
+discord_notify.py — 8대 지표 현재값을 매일 Discord 로 전송
+Windows Task Scheduler 에서 08:00 에 실행:
+  python "c:\Users\user\옵션 저점매수전략\discord_notify.py"
+"""
+
+import sys
+import requests
+import pandas as pd
+import numpy as np
+import yfinance as yf
+from datetime import datetime
+
+WEBHOOK_URL = (
+    "https://discord.com/api/webhooks/1487700119137816657/"
+    "rG52A7W_J8oTlsITvWaJgAuukFiOUueoICHRPW7bMEoDIcmrmMkSDBeNC8e6z4N66WMC"
+)
+
+PERIOD = "1y"
+
+
+# ── 데이터 수집 ──────────────────────────────────────────────────────────────
+
+def fetch(ticker: str) -> pd.DataFrame | None:
+    try:
+        df = yf.download(ticker, period=PERIOD, interval="1d",
+                         progress=False, auto_adjust=True)
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        return df if not df.empty else None
+    except Exception:
+        return None
+
+
+def fetch_cboe(name: str) -> pd.Series | None:
+    url = (f"https://cdn.cboe.com/api/global/us_indices/daily_prices/"
+           f"{name}_History.csv")
+    try:
+        df = pd.read_csv(url, parse_dates=[0])
+        df.columns = [c.strip().upper() for c in df.columns]
+        date_col  = df.columns[0]
+        close_col = "CLOSE" if "CLOSE" in df.columns else df.columns[-1]
+        s = df.set_index(date_col)[close_col].dropna()
+        s.index = pd.to_datetime(s.index)
+        return s.sort_index().astype(float)
+    except Exception:
+        return None
+
+
+def close(df: pd.DataFrame | None) -> pd.Series | None:
+    if df is None:
+        return None
+    s = df["Close"]
+    if isinstance(s, pd.DataFrame):
+        s = s.iloc[:, 0]
+    return pd.Series(s, dtype=float).dropna()
+
+
+def last(s) -> float | None:
+    if s is None:
+        return None
+    if isinstance(s, pd.Series) and not s.empty:
+        return float(s.iloc[-1])
+    return None
+
+
+def ratio(a, b):
+    if a is None or b is None:
+        return None
+    m = pd.concat([a, b], axis=1).dropna()
+    if m.empty:
+        return None
+    m.columns = ["a", "b"]
+    return (m["a"] / m["b"]).replace([np.inf, -np.inf], np.nan).dropna()
+
+
+def sma(s, w):
+    return s.rolling(w).mean() if s is not None else None
+
+
+def ema(s, span):
+    return s.ewm(span=span, adjust=False).mean() if s is not None else None
+
+
+def na(v, fmt="{:.2f}"):
+    return fmt.format(v) if v is not None else "N/A"
+
+
+# ── 신호 점수 ────────────────────────────────────────────────────────────────
+
+def score_sdex_voli(v):
+    if v is None: return None
+    if v <= 1.0: return 2
+    if v <= 2.0: return 1
+    return 0
+
+def score_skew_vix(v):
+    if v is None: return None
+    if v <= 2.0: return 2
+    if v <= 5.0: return 1
+    if v < 11.0: return 0
+    return -2
+
+def score_tdex_cor1m(v):
+    if v is None: return None
+    if v <= 0.5: return 1
+    if v < 1.0:  return 0
+    return -1
+
+def score_vvix_vix(v):
+    if v is None: return None
+    if v <= 3.5:  return 2
+    if v <= 4.75: return 1
+    if v < 6.5:   return 0
+    return -1
+
+def score_tdex(v):
+    if v is None: return None
+    if v > 30: return 2
+    if v > 25: return 2
+    if v > 20: return 1
+    return 0
+
+def score_vvix_ema(v, e):
+    if v is None or e is None: return None
+    return 1 if v < e else -1
+
+def score_vix_vix3m(v):
+    if v is None: return None
+    if v < 1.0: return 0
+    return -1
+
+SIGNAL_EMOJI = {2: "🟢", 1: "🟢", 0: "⚪", -1: "🔴", -2: "🔴"}
+SIGNAL_NAME  = {2: "강한 롱 +2", 1: "롱 +1", 0: "중립 0", -1: "숏 −1", -2: "강한 숏 −2"}
+
+
+def fmt_signal(sc):
+    if sc is None:
+        return "⚫ N/A"
+    return f"{SIGNAL_EMOJI.get(sc, '⚫')} {SIGNAL_NAME.get(sc, str(sc))}"
+
+
+# ── SPY 통합 신호 ────────────────────────────────────────────────────────────
+
+def build_spy_signal(r_vvix_vix, r_skew_vix, r_tdex_cor1m, r_sdex_voli, vvix_c):
+    w = 1.0
+    parts = {}
+    if r_vvix_vix is not None:
+        sig = pd.Series(0.0, index=r_vvix_vix.index)
+        sig[r_vvix_vix <= 3.50] = 2.0
+        sig[(r_vvix_vix > 3.50) & (r_vvix_vix <= 4.75)] = 1.0
+        sig[r_vvix_vix >= 6.50] = -1.0
+        parts["vvix_vix"] = (sig, w)
+    if vvix_c is not None:
+        e7 = vvix_c.ewm(span=7, adjust=False).mean()
+        m  = pd.concat([vvix_c, e7], axis=1).dropna()
+        m.columns = ["v", "e"]
+        sig = pd.Series(0.0, index=m.index)
+        sig[m["v"] < m["e"]] =  1.0
+        sig[m["v"] > m["e"]] = -1.0
+        parts["vvix_ema"] = (sig, w)
+    if r_skew_vix is not None:
+        sig = pd.Series(0.0, index=r_skew_vix.index)
+        sig[r_skew_vix <= 2.0] = 2.0
+        sig[(r_skew_vix > 2.0) & (r_skew_vix <= 5.0)] = 1.0
+        sig[r_skew_vix >= 11.0] = -2.0
+        parts["skew_vix"] = (sig, w)
+    if r_tdex_cor1m is not None:
+        sig = pd.Series(0.0, index=r_tdex_cor1m.index)
+        sig[r_tdex_cor1m <= 0.5] =  1.0
+        sig[r_tdex_cor1m >= 1.0] = -1.0
+        parts["tdex_cor1m"] = (sig, w)
+    if r_sdex_voli is not None:
+        sig = pd.Series(0.0, index=r_sdex_voli.index)
+        sig[r_sdex_voli <= 1.0] = 2.0
+        sig[(r_sdex_voli > 1.0) & (r_sdex_voli <= 2.0)] = 1.0
+        parts["sdex_voli"] = (sig, w)
+    if not parts:
+        return None, None
+    df   = pd.concat([s for s, _ in parts.values()], axis=1).dropna()
+    wts  = np.ones(len(parts))
+    vals = df.values.astype(float)
+    raw  = np.nanmean(vals * wts, axis=1) * len(parts) / len(parts)
+    raw  = vals.mean(axis=1)
+    final = int(np.clip(round(float(raw[-1])), -2, 2))
+    return final, float(raw[-1])
+
+
+# ── Discord 전송 ─────────────────────────────────────────────────────────────
+
+def send_discord(payload: dict) -> bool:
+    try:
+        r = requests.post(WEBHOOK_URL, json=payload, timeout=15)
+        r.raise_for_status()
+        return True
+    except Exception as e:
+        print(f"Discord 전송 실패: {e}", file=sys.stderr)
+        return False
+
+
+def build_embed(rows: list[dict], spy_final: int | None, spy_raw: float | None,
+                v_spx: float | None, v_vix: float | None,
+                v_vvix: float | None, v_skew: float | None) -> dict:
+    date_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    spy_line = (f"{fmt_signal(spy_final)}  (raw {spy_raw:.2f})"
+                if spy_final is not None else "⚫ N/A")
+
+    # 색상: 양수 신호 → 녹색, 음수 → 빨강, 중립 → 회색
+    color = (0x26a69a if spy_final is not None and spy_final > 0
+             else 0xef5350 if spy_final is not None and spy_final < 0
+             else 0x808080)
+
+    # 지표 행 → Discord embed fields (inline 3열)
+    fields = []
+    for row in rows:
+        fields.append({
+            "name": row["지표"],
+            "value": f"**{row['현재값']}**\n{row['신호']}\n_{row['해석']}_",
+            "inline": True,
+        })
+
+    # 구분선용 빈 필드 (3의 배수 맞춤)
+    while len(fields) % 3 != 0:
+        fields.append({"name": "\u200b", "value": "\u200b", "inline": True})
+
+    embed = {
+        "title": f"📊 옵션 저점매수 전략 — 8대 지표 현황",
+        "description": (
+            f"**날짜**: {date_str}\n"
+            f"**SPX**: {na(v_spx, '{:.0f}')}  |  "
+            f"**VIX**: {na(v_vix)}  |  "
+            f"**VVIX**: {na(v_vvix, '{:.1f}')}  |  "
+            f"**SKEW**: {na(v_skew, '{:.1f}')}\n\n"
+            f"**⑧ SPY 통합 신호**: {spy_line}"
+        ),
+        "color": color,
+        "fields": fields,
+        "footer": {"text": "데이터: Yahoo Finance / CBOE"},
+        "timestamp": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+    }
+    return {"embeds": [embed]}
+
+
+# ── 메인 ─────────────────────────────────────────────────────────────────────
+
+def main():
+    print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] 데이터 수집 중...")
+
+    spx_c   = close(fetch("^GSPC"))
+    vix_c   = close(fetch("^VIX"))
+    vvix_c  = close(fetch("^VVIX"))
+    skew_c  = close(fetch("^SKEW"))
+    vix3m_c = close(fetch("^VIX3M"))
+    sdex_c  = close(fetch("^SDEX"))
+    voli_c  = close(fetch("^VOLI"))
+    tdex_c  = close(fetch("^TDEX"))
+    cor1m_c = close(fetch("^COR1M"))
+    if cor1m_c is None:
+        cor1m_c = fetch_cboe("COR1M")
+
+    r_vvix_vix   = ratio(vvix_c, vix_c)
+    r_skew_vix   = ratio(skew_c, vix_c)
+    r_sdex_voli  = ratio(sdex_c, voli_c)
+    r_tdex_cor1m = ratio(tdex_c, cor1m_c)
+    r_vix_vix3m  = ratio(vix_c,  vix3m_c)
+
+    v_spx        = last(spx_c)
+    v_vix        = last(vix_c)
+    v_vvix       = last(vvix_c)
+    v_skew       = last(skew_c)
+    v_vix3m      = last(vix3m_c)
+    v_tdex       = last(tdex_c)
+    v_vvix_vix   = last(r_vvix_vix)
+    v_skew_vix   = last(r_skew_vix)
+    v_sdex_voli  = last(r_sdex_voli)
+    v_tdex_cor1m = last(r_tdex_cor1m)
+    v_vix_vix3m  = last(r_vix_vix3m)
+
+    sma50_vvix_vix = last(sma(r_vvix_vix, 50))
+    sma200_tdex    = last(sma(tdex_c, 200))
+    ema7_vvix      = last(ema(vvix_c, 7))
+
+    spy_final, spy_raw = build_spy_signal(
+        r_vvix_vix, r_skew_vix, r_tdex_cor1m, r_sdex_voli, vvix_c
+    )
+
+    rows = [
+        {
+            "지표": "① SDEX/VOLI",
+            "현재값": na(v_sdex_voli),
+            "신호": fmt_signal(score_sdex_voli(v_sdex_voli)),
+            "해석": ("Must Buy Secular" if v_sdex_voli is not None and v_sdex_voli <= 1.0
+                     else "Must Buy Cyclical" if v_sdex_voli is not None and v_sdex_voli <= 2.0
+                     else "일반 시장 상태"),
+        },
+        {
+            "지표": "② SKEW/VIX",
+            "현재값": na(v_skew_vix),
+            "신호": fmt_signal(score_skew_vix(v_skew_vix)),
+            "해석": ("Approaching Must Buy" if v_skew_vix is not None and v_skew_vix <= 2.0
+                     else "Correction Lows" if v_skew_vix is not None and v_skew_vix <= 5.0
+                     else "Reversal Risk" if v_skew_vix is not None and v_skew_vix >= 11.0
+                     else "일반 시장 상태"),
+        },
+        {
+            "지표": "③ TDEX/COR1M",
+            "현재값": na(v_tdex_cor1m),
+            "신호": fmt_signal(score_tdex_cor1m(v_tdex_cor1m)),
+            "해석": ("Cheap Tail Hedge" if v_tdex_cor1m is not None and v_tdex_cor1m <= 0.5
+                     else "OTM 비용 과다" if v_tdex_cor1m is not None and v_tdex_cor1m > 1.0
+                     else "중립적 가격대"),
+        },
+        {
+            "지표": "④ VVIX/VIX",
+            "현재값": f"{na(v_vvix_vix)} (SMA50:{na(sma50_vvix_vix)})",
+            "신호": fmt_signal(score_vvix_vix(v_vvix_vix)),
+            "해석": ("Getting Overdone" if v_vvix_vix is not None and v_vvix_vix <= 3.5
+                     else "BTFD Potential" if v_vvix_vix is not None and v_vvix_vix <= 4.75
+                     else "Getting Extended" if v_vvix_vix is not None and v_vvix_vix >= 6.5
+                     else "일반 시장 상태"),
+        },
+        {
+            "지표": "⑤ TDEX & 200SMA",
+            "현재값": f"{na(v_tdex, '{:.1f}')} (SMA:{na(sma200_tdex, '{:.1f}')})",
+            "신호": fmt_signal(score_tdex(v_tdex)),
+            "해석": ("MUST BUY ZONE" if v_tdex is not None and v_tdex > 30
+                     else "Big Crashes End" if v_tdex is not None and v_tdex > 25
+                     else "Corrections End" if v_tdex is not None and v_tdex > 20
+                     else "OTM Puts @ Premium"),
+        },
+        {
+            "지표": "⑥ VVIX & EMA7",
+            "현재값": f"{na(v_vvix, '{:.1f}')} (EMA7:{na(ema7_vvix, '{:.1f}')})",
+            "신호": fmt_signal(score_vvix_ema(v_vvix, ema7_vvix)),
+            "해석": ("스트레스 레벨" if v_vvix is not None and v_vvix > 100
+                     else "정상 레벨" if v_vvix is not None and v_vvix >= 80
+                     else "저레벨"),
+        },
+        {
+            "지표": "⑦ VIX/VIX3M",
+            "현재값": na(v_vix_vix3m, "{:.3f}"),
+            "신호": fmt_signal(score_vix_vix3m(v_vix_vix3m)),
+            "해석": ("강한 컨탱고" if v_vix_vix3m is not None and v_vix_vix3m <= 0.8
+                     else "백워데이션" if v_vix_vix3m is not None and v_vix_vix3m >= 1.0
+                     else "정상 기간 구조"),
+        },
+    ]
+
+    payload = build_embed(rows, spy_final, spy_raw, v_spx, v_vix, v_vvix, v_skew)
+    ok = send_discord(payload)
+    print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] Discord 전송 {'성공' if ok else '실패'}")
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
