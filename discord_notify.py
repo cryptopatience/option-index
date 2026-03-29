@@ -1,9 +1,11 @@
 """
-discord_notify.py - 8대 지표 현재값 요약을 매일 Discord 로 전송
+discord_notify.py - 8대 지표 현재값 요약 + AI 종합분析을 매일 Discord 로 전송
 실행: python discord_notify.py
 """
 
 import sys
+import os
+import pathlib
 import requests
 import pandas as pd
 import numpy as np
@@ -15,6 +17,29 @@ WEBHOOK_URL = (
     "rG52A7W_J8oTlsITvWaJgAuukFiOUueoICHRPW7bMEoDIcmrmMkSDBeNC8e6z4N66WMC"
 )
 PERIOD = "1y"
+SCRIPT_DIR = pathlib.Path(__file__).parent
+
+
+# ── secrets.toml 로더 ────────────────────────────────────────────────────────
+
+def load_secrets() -> dict:
+    """Load API keys from .streamlit/secrets.toml"""
+    secrets_path = SCRIPT_DIR / ".streamlit" / "secrets.toml"
+    result = {}
+    if not secrets_path.exists():
+        return result
+    try:
+        import tomllib
+        with open(secrets_path, "rb") as f:
+            result = tomllib.load(f)
+    except ImportError:
+        # Python < 3.11 fallback: simple line parser
+        for line in secrets_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if "=" in line and not line.startswith("#"):
+                k, _, v = line.partition("=")
+                result[k.strip()] = v.strip().strip('"').strip("'")
+    return result
 
 
 # ── 데이터 수집 ──────────────────────────────────────────────────────────────
@@ -333,6 +358,110 @@ def build_payload(rows, spy_final, spy_raw, v_spx, v_vix, v_vvix, v_skew):
     return {"embeds": [header_embed, table_embed]}
 
 
+# ── AI 종합분析 ──────────────────────────────────────────────────────────────
+
+def build_analysis_prompt(rows, spy_final, spy_raw,
+                          v_spx, v_vix, v_vvix, v_skew, v_vix3m) -> str:
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    spy_line = (f"{spy_final:+d} (raw {spy_raw:.2f})"
+                if spy_final is not None else "N/A")
+
+    indicator_lines = "\n".join(
+        f"- {r['지표']}: {r['현재값']}  →  {r['신호']}  ({r['해석']})"
+        for r in rows
+    )
+
+    return f"""당신은 전문 옵션 트레이더이자 퀀트 애널리스트입니다.
+아래는 {date_str} 기준 8대 CBOE 변동성 지표 현황입니다.
+이를 바탕으로 SPY/S&P500 시장에 대한 종합 분析을 한국어로 작성하세요.
+
+## 지표 현황
+- SPX: {na(v_spx, '{:.0f}')}  |  VIX: {na(v_vix)}  |  VIX3M: {na(v_vix3m)}
+- VVIX: {na(v_vvix, '{:.1f}')}  |  SKEW: {na(v_skew, '{:.1f}')}
+{indicator_lines}
+- SPY 통합 신호: {spy_line}
+
+## 분析 요청 (간결하게, 총 500자 내외)
+1. 현재 지표들이 시사하는 시장 환경 요약 (2~3문장)
+2. 매수/중립/매도 종합 판단과 근거
+3. 단기(1~2주) 핵심 리스크 1가지 + 기회 1가지
+4. 지금 당장 취할 수 있는 옵션 전략 1가지 (구체적으로)
+"""
+
+
+def _gemini_analyze(prompt: str, api_key: str) -> str:
+    try:
+        import google.generativeai as genai
+        genai.configure(api_key=api_key)
+        for model_name in ["gemini-2.5-pro", "gemini-2.5-pro-preview-05-06",
+                           "gemini-2.5-pro-exp-03-25", "gemini-1.5-pro"]:
+            try:
+                model = genai.GenerativeModel(model_name)
+                resp  = model.generate_content(prompt)
+                return f"*{model_name}*\n\n{resp.text}"
+            except Exception:
+                continue
+        return "Gemini: 사용 가능한 모델 없음"
+    except Exception as e:
+        return f"Gemini 오류: {e}"
+
+
+def _openai_analyze(prompt: str, api_key: str) -> str:
+    try:
+        from openai import OpenAI
+        client = OpenAI(api_key=api_key)
+        resp = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=1200,
+        )
+        return resp.choices[0].message.content
+    except Exception as e:
+        return f"ChatGPT 오류: {e}"
+
+
+def _chunk(text: str, max_len: int = 4000) -> list[str]:
+    """Split text into chunks that fit within Discord's embed description limit."""
+    if len(text) <= max_len:
+        return [text]
+    chunks = []
+    while text:
+        if len(text) <= max_len:
+            chunks.append(text)
+            break
+        split_at = text.rfind("\n", 0, max_len)
+        if split_at == -1:
+            split_at = max_len
+        chunks.append(text[:split_at])
+        text = text[split_at:].lstrip("\n")
+    return chunks
+
+
+def build_ai_embeds(gemini_text: str | None, openai_text: str | None,
+                    color: int) -> list[dict]:
+    """Build Discord embeds for AI analysis (chunked if > 4000 chars)."""
+    embeds = []
+    date_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    for label, icon, text in [
+        ("Gemini 2.5 Pro", "🔵", gemini_text),
+        ("ChatGPT GPT-4o",  "🟢", openai_text),
+    ]:
+        if not text:
+            continue
+        chunks = _chunk(text)
+        for i, chunk in enumerate(chunks):
+            title = (f"{icon} AI 종합분析 — {label}  [{date_str}]"
+                     if i == 0 else f"{icon} {label} (계속 {i+1}/{len(chunks)})")
+            embeds.append({
+                "title":       title,
+                "description": chunk,
+                "color":       color,
+            })
+
+    return embeds
+
+
 # ── Discord 전송 ─────────────────────────────────────────────────────────────
 
 def send_discord(payload: dict) -> bool:
@@ -394,10 +523,39 @@ def main():
         spy_final, spy_raw,
     )
 
+    # ── 1차 전송: 지표 테이블 ───────────────────────────────────────────────
     payload = build_payload(rows, spy_final, spy_raw, v_spx, v_vix, v_vvix, v_skew)
-    ok = send_discord(payload)
-    print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] Discord 전송 {'성공' if ok else '실패'}")
-    return 0 if ok else 1
+    ok1 = send_discord(payload)
+    print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] 지표 테이블 전송 {'성공' if ok1 else '실패'}")
+
+    # ── 2차 전송: AI 종합분析 ────────────────────────────────────────────────
+    secrets      = load_secrets()
+    gemini_key   = secrets.get("GEMINI_API_KEY", "")
+    openai_key   = secrets.get("OPENAI_API_KEY", "")
+
+    prompt = build_analysis_prompt(
+        rows, spy_final, spy_raw,
+        v_spx, v_vix, v_vvix, v_skew, v_vix3m
+    )
+
+    gemini_text = _gemini_analyze(prompt, gemini_key) if gemini_key else None
+    openai_text = _openai_analyze(prompt, openai_key) if openai_key else None
+
+    color = (0x26a69a if spy_final is not None and spy_final > 0
+             else 0xef5350 if spy_final is not None and spy_final < 0
+             else 0x808080)
+
+    ai_embeds = build_ai_embeds(gemini_text, openai_text, color)
+    ok2 = True
+    if ai_embeds:
+        # Discord: 최대 10 embeds/message → 배치 전송
+        for i in range(0, len(ai_embeds), 10):
+            ok2 = send_discord({"embeds": ai_embeds[i:i+10]}) and ok2
+        print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] AI 분析 전송 {'성공' if ok2 else '실패'}")
+    else:
+        print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] AI 분析 스킵 (API 키 없음)")
+
+    return 0 if (ok1 and ok2) else 1
 
 
 if __name__ == "__main__":
