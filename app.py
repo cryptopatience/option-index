@@ -35,7 +35,8 @@ if not st.session_state.authenticated:
     if st.button("로그인", type="primary"):
         if pwd == st.secrets.get("APP_PASSWORD", "1234"):
             st.session_state.authenticated = True
-            st.session_state["run_ai_on_login"] = True   # 로그인 시 자동 분석 트리거
+            st.session_state["run_ai_on_login"] = True   # 로그인 시 자동 분석 트리거
+            st.session_state["discord_on_login"] = True  # 로그인 시 Discord 전송 트리거
             st.rerun()
         else:
             st.error("비밀번호가 틀렸습니다.")
@@ -1199,6 +1200,12 @@ if st.session_state.get("rerun_spy_ai"):
     with st.spinner("SPY 신호 AI 분析 중..."):
         run_spy_ai_analysis()
 
+if st.session_state.get("discord_on_login"):
+    st.session_state["discord_on_login"] = False
+    import threading, discord_notify as _dn
+    threading.Thread(target=_dn.main, daemon=True).start()
+    st.toast("📨 Discord 전송 시작됨")
+
 if st.session_state.get("rerun_ind_ai"):
     with st.spinner("개별 지표 AI 분析 중..."):
         run_indicator_ai_analysis()
@@ -1229,16 +1236,10 @@ with st.sidebar:
             _next = _s.get("next_send", "—")
             _det  = _s.get("detail", "")
             st.markdown(f"{_icon} **마지막 전송**  \n`{_last}`  \n_{_det}_")
-            st.markdown(f"🕗 **다음 예정**  \n`{_next}`")
         except Exception:
             st.warning("상태 파일 읽기 실패")
     else:
-        _now  = datetime.now()
-        _next = _now.replace(hour=8, minute=0, second=0, microsecond=0)
-        if _next <= _now:
-            _next += timedelta(days=1)
-        st.markdown(f"⏳ **아직 전송 전**  \n다음 예정: `{_next.strftime('%Y-%m-%d 08:00')}`")
-
+        st.markdown("⏳ **아직 전송 전** 로그인 시 자동 전송")
     st.markdown("<br>" * 3, unsafe_allow_html=True)
     st.divider()
     if st.button("🚪 로그아웃", use_container_width=True):

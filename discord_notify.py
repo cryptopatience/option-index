@@ -24,16 +24,12 @@ STATUS_FILE = SCRIPT_DIR / "discord_status.json"
 
 def save_status(ok_table: bool, ok_ai: bool, detail: str = "") -> None:
     now      = datetime.now()
-    next_run = (now + timedelta(days=1)).replace(hour=8, minute=0, second=0, microsecond=0)
-    if next_run <= now:
-        next_run += timedelta(days=1)
     payload = {
         "last_sent":   now.strftime("%Y-%m-%d %H:%M:%S"),
         "table_ok":    ok_table,
         "ai_ok":       ok_ai,
         "overall_ok":  ok_table and ok_ai,
         "detail":      detail,
-        "next_send":   next_run.strftime("%Y-%m-%d %H:%M"),
     }
     with open(STATUS_FILE, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
