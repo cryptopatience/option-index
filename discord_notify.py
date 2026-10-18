@@ -6,6 +6,7 @@ discord_notify.py - 8대 지표 현재값 요약 + AI 종합분析을 매일 Dis
 import sys
 import os
 import json
+import logging
 import pathlib
 import requests
 import pandas as pd
@@ -13,13 +14,11 @@ import numpy as np
 import yfinance as yf
 from datetime import datetime, timedelta
 
-WEBHOOK_URL = (
-    "https://discord.com/api/webhooks/1487700119137816657/"
-    "rG52A7W_J8oTlsITvWaJgAuukFiOUueoICHRPW7bMEoDIcmrmMkSDBeNC8e6z4N66WMC"
-)
 PERIOD     = "1y"
 SCRIPT_DIR = pathlib.Path(__file__).parent
 STATUS_FILE = SCRIPT_DIR / "discord_status.json"
+logger = logging.getLogger(__name__)
+_missing_webhook_warned = False
 
 
 def save_status(ok_table: bool, ok_ai: bool, detail: str = "") -> None:
@@ -55,6 +54,49 @@ def load_secrets() -> dict:
                 k, _, v = line.partition("=")
                 result[k.strip()] = v.strip().strip('"').strip("'")
     return result
+
+
+def resolve_webhook_url() -> str:
+    """Discord webhook URL from env DISCORD_WEBHOOK_URL or st.secrets.
+
+    Empty string when unset. The URL is never hardcoded.
+    """
+    env_url = os.environ.get("DISCORD_WEBHOOK_URL", "").strip()
+    if env_url:
+        return env_url
+
+    file_url = str(load_secrets().get("DISCORD_WEBHOOK_URL", "") or "").strip()
+    if file_url:
+        return file_url
+
+    return _webhook_from_st_secrets()
+
+
+def _webhook_from_st_secrets() -> str:
+    """Read DISCORD_WEBHOOK_URL from st.secrets when that source is available."""
+    try:
+        import streamlit as st
+    except Exception:
+        return ""
+
+    secrets_path = SCRIPT_DIR / ".streamlit" / "secrets.toml"
+    home_secrets = pathlib.Path.home() / ".streamlit" / "secrets.toml"
+    in_app = False
+    try:
+        from streamlit.runtime.scriptrunner import get_script_run_ctx
+        in_app = get_script_run_ctx() is not None
+    except Exception:
+        in_app = False
+
+    # Avoid Streamlit's missing-secrets error when nothing is configured.
+    if not in_app and not secrets_path.exists() and not home_secrets.exists():
+        return ""
+
+    try:
+        val = st.secrets.get("DISCORD_WEBHOOK_URL", "")
+    except Exception:
+        return ""
+    return str(val).strip() if val else ""
 
 
 # ── 데이터 수집 ──────────────────────────────────────────────────────────────
@@ -480,8 +522,18 @@ def build_ai_embeds(gemini_text: str | None, openai_text: str | None,
 # ── Discord 전송 ─────────────────────────────────────────────────────────────
 
 def send_discord(payload: dict) -> bool:
+    global _missing_webhook_warned
+    url = resolve_webhook_url()
+    if not url:
+        if not _missing_webhook_warned:
+            logger.warning(
+                "DISCORD_WEBHOOK_URL이 없어 Discord 전송을 건너뜁니다. "
+                "st.secrets 또는 환경변수 DISCORD_WEBHOOK_URL을 설정하세요."
+            )
+            _missing_webhook_warned = True
+        return False
     try:
-        r = requests.post(WEBHOOK_URL, json=payload, timeout=15)
+        r = requests.post(url, json=payload, timeout=15)
         r.raise_for_status()
         return True
     except Exception as e:
